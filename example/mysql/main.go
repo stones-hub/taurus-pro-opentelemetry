@@ -19,7 +19,6 @@
 package main
 
 import (
-	"context"
 	"log"
 
 	"github.com/stones-hub/taurus-pro-opentelemetry/pkg/otelemetry"
@@ -34,7 +33,7 @@ type User struct {
 
 func main() {
 	// 1. 初始化追踪器提供者
-	provider, _, err := otelemetry.NewOTelProvider(
+	_, cleanup, err := otelemetry.NewOTelProvider(
 		otelemetry.WithServiceName("mysql-demo"),
 		otelemetry.WithServiceVersion("v0.1.0"),
 		otelemetry.WithEnvironment("dev"),
@@ -42,11 +41,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("init telemetry provider failed: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	// cleanup 以有限超时（默认 5 秒）关闭提供者并 flush 剩余 span，失败时写日志
+	defer cleanup()
 
 	// 2. 初始化 MySQL
 	/*
-		mysqlTracer := provider.Tracer("mysql-client")
+		mysqlTracer := otelemetry.GetTracer("mysql-client")
 		db.InitDB("default", "mysql", "root:password@tcp(127.0.0.1:3306)/test?charset=utf8mb4&parseTime=True&loc=Local",
 			db.NewDBCustomLogger(db.DBLoggerConfig{
 				LogLevel: 4,
@@ -58,6 +58,8 @@ func main() {
 			if err := db.Use(&telemetry.GormTracingHook{
 				Tracer: mysqlTracer,
 			}); err != nil {
+				// log.Fatalf 会跳过 defer，退出前先显式 cleanup
+				cleanup()
 				log.Fatalf("use tracing hook failed: %v", err)
 			}
 		}

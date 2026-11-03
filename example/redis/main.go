@@ -28,7 +28,7 @@ import (
 
 func main() {
 	// 1. 初始化追踪器提供者
-	provider, _, err := otelemetry.NewOTelProvider(
+	provider, cleanup, err := otelemetry.NewOTelProvider(
 		otelemetry.WithServiceName("redis-demo"),
 		otelemetry.WithServiceVersion("v0.1.0"),
 		otelemetry.WithEnvironment("dev"),
@@ -36,7 +36,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("init telemetry provider failed: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	// cleanup 以有限超时（默认 5 秒）关闭提供者并 flush 剩余 span，失败时写日志
+	defer cleanup()
 
 	// 2. 初始化 Redis
 	redisTracer := provider.Tracer("redis-client")
@@ -45,6 +46,8 @@ func main() {
 		redisx.WithDB(0),
 	)
 	if err != nil {
+		// log.Fatalf 会跳过 defer，退出前先显式 cleanup
+		cleanup()
 		log.Fatalf("init redis failed: %v", err)
 	}
 

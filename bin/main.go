@@ -129,7 +129,7 @@ func (m *inventoryModule) updateStock(ctx context.Context, productID string) {
 
 func main() {
 	// 1. 初始化追踪器提供者
-	provider, _, err := otelemetry.NewOTelProvider(
+	provider, cleanup, err := otelemetry.NewOTelProvider(
 		otelemetry.WithServiceName("Taurus"),
 		otelemetry.WithServiceVersion("v0.1.0"),
 		otelemetry.WithEnvironment("dev"),
@@ -146,7 +146,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("init telemetry provider failed: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	// cleanup 以有限超时（默认 5 秒）关闭提供者并 flush 剩余 span，失败时写日志
+	defer cleanup()
 
 	// 2. 初始化各个模块的追踪器
 	userMod := newUserModule(provider.Tracer("user-module"))

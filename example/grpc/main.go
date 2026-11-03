@@ -20,8 +20,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/stones-hub/taurus-pro-opentelemetry/pkg/otelemetry"
@@ -159,16 +163,25 @@ func streamType(info *grpc.StreamServerInfo) string {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("grpc demo failed: %v", err)
+	}
+}
+
+// run 返回前一定会执行 cleanup：收到 SIGINT/SIGTERM 后先有界地停止 gRPC 服务器，
+// 再 flush 追踪数据；log.Fatalf 只在 main 中、所有 defer 执行完之后调用
+func run() error {
 	// 1. 初始化追踪器提供者
-	provider, _, err := otelemetry.NewOTelProvider(
+	provider, cleanup, err := otelemetry.NewOTelProvider(
 		otelemetry.WithServiceName("grpc-demo"),
 		otelemetry.WithServiceVersion("v0.1.0"),
 		otelemetry.WithEnvironment("dev"),
 	)
 	if err != nil {
-		log.Fatalf("init telemetry provider failed: %v", err)
+		return fmt.Errorf("init telemetry provider failed: %w", err)
 	}
-	defer provider.Shutdown(context.Background())
+	// cleanup 以有限超时（默认 5 秒）关闭提供者并 flush 剩余 span，失败时写日志
+	defer cleanup()
 
 	// 2. 获取追踪器
 	tracer := provider.Tracer("grpc-server")
@@ -176,7 +189,7 @@ func main() {
 	// 3. 启动 gRPC 服务器
 	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		return fmt.Errorf("failed to listen: %w", err)
 	}
 
 	// 使用追踪拦截器
@@ -188,8 +201,33 @@ func main() {
 	// 这里可以注册你的 gRPC 服务
 	// pb.RegisterYourServiceServer(s, &yourServiceServer{})
 
+	// 4. 启动 gRPC 服务器，等待退出信号
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- s.Serve(lis) }()
 	log.Printf("gRPC server listening at %v", lis.Addr())
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("failed to serve: %w", err)
+	case <-ctx.Done():
 	}
+
+	// 5. 有界地停止 gRPC 服务器：GracefulStop 最多等待 5 秒，超时后 Stop 强制关闭剩余连接，
+	// 并发调用 Stop 会让仍在等待的 GracefulStop 返回
+	log.Printf("shutting down gRPC server")
+	stopped := make(chan struct{})
+	go func() {
+		s.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		s.Stop()
+		<-stopped
+	}
+	return nil
 }

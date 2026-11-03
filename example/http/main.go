@@ -21,9 +21,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/stones-hub/taurus-pro-opentelemetry/pkg/otelemetry"
@@ -120,16 +125,25 @@ func UserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("http demo failed: %v", err)
+	}
+}
+
+// run 返回前一定会执行 cleanup：收到 SIGINT/SIGTERM 后先有界地关闭 HTTP 服务器，
+// 再 flush 追踪数据；log.Fatalf 只在 main 中、所有 defer 执行完之后调用
+func run() error {
 	// 1. 初始化追踪器提供者
-	provider, _, err := otelemetry.NewOTelProvider(
+	provider, cleanup, err := otelemetry.NewOTelProvider(
 		otelemetry.WithServiceName("http-demo"),
 		otelemetry.WithServiceVersion("v0.1.0"),
 		otelemetry.WithEnvironment("dev"),
 	)
 	if err != nil {
-		log.Fatalf("init telemetry provider failed: %v", err)
+		return fmt.Errorf("init telemetry provider failed: %w", err)
 	}
-	defer provider.Shutdown(context.Background())
+	// cleanup 以有限超时（默认 5 秒）关闭提供者并 flush 剩余 span，失败时写日志
+	defer cleanup()
 
 	// 2. 获取追踪器
 	tracer := provider.Tracer("http-server")
@@ -141,9 +155,27 @@ func main() {
 	handler := TraceMiddleware(tracer)(http.HandlerFunc(UserHandler))
 	mux.Handle("/user/", handler)
 
-	// 4. 启动 HTTP 服务器
+	// 4. 启动 HTTP 服务器，等待退出信号
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	srv := &http.Server{Addr: ":8080", Handler: mux}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
 	log.Printf("HTTP server listening at :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
-		log.Fatalf("run http server failed: %v", err)
+
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("run http server failed: %w", err)
+	case <-ctx.Done():
 	}
+
+	// 5. 有界地关闭 HTTP 服务器：最多等待 5 秒处理中的请求，超时则强制关闭连接
+	log.Printf("shutting down HTTP server")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return errors.Join(fmt.Errorf("shutdown http server: %w", err), srv.Close())
+	}
+	return nil
 }

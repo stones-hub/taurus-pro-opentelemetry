@@ -16,7 +16,7 @@
 // Email: 61647649@qq.com
 // Date: 2025-06-13
 
-// Package telemetry 提供了基于 OpenTelemetry 的分布式追踪功能。
+// Package otelemetry 提供了基于 OpenTelemetry 的分布式追踪功能。
 // 该包支持配置化的链路追踪，可以灵活地设置服务信息、采样率、批处理等参数。
 package otelemetry
 
@@ -30,9 +30,10 @@ type ExportProtocol string
 const (
 	// ProtocolGRPC 使用 gRPC 协议导出
 	ProtocolGRPC ExportProtocol = "grpc"
-	// ProtocolHTTP 使用 HTTP 协议导出
+	// ProtocolHTTP 使用 OTLP/HTTP 协议导出，请求体为 protobuf 编码
 	ProtocolHTTP ExportProtocol = "http"
-	// ProtocolJSON 使用 HTTP/JSON 协议导出
+	// ProtocolJSON 历史别名，行为与 ProtocolHTTP 完全相同：发送的是 protobuf 编码，
+	// 并不会发送 JSON。保留该常量只为兼容旧代码编译
 	ProtocolJSON ExportProtocol = "json"
 )
 
@@ -61,7 +62,13 @@ type options struct {
 	exportTimeout      time.Duration // 导出超时时间
 	maxExportBatchSize int           // 最大导出批次大小
 	maxQueueSize       int           // 最大队列大小
+
+	// 退出配置
+	shutdownTimeout time.Duration // NewOTelProvider 返回的 cleanup 关闭时的超时时间
 }
+
+// DefaultShutdownTimeout NewOTelProvider 返回的 cleanup 关闭追踪提供者时的默认超时时间
+const DefaultShutdownTimeout = 5 * time.Second
 
 // defaultOptions 返回默认配置，提供合理的默认值
 func defaultOptions() *options {
@@ -78,6 +85,7 @@ func defaultOptions() *options {
 		exportTimeout:      30 * time.Second,
 		maxExportBatchSize: 512,
 		maxQueueSize:       2048,
+		shutdownTimeout:    DefaultShutdownTimeout,
 	}
 }
 
@@ -174,5 +182,15 @@ func WithMaxQueueSize(size int) Option {
 func WithExportProtocol(protocol ExportProtocol) Option {
 	return func(o *options) {
 		o.protocol = protocol
+	}
+}
+
+// WithShutdownTimeout 设置 NewOTelProvider 返回的 cleanup 函数关闭时的超时时间
+// timeout: 小于等于 0 时使用 DefaultShutdownTimeout；直接调用 Shutdown(ctx) 时以 ctx 为准
+func WithShutdownTimeout(timeout time.Duration) Option {
+	return func(o *options) {
+		if timeout > 0 {
+			o.shutdownTimeout = timeout
+		}
 	}
 }
