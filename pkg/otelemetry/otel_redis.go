@@ -20,6 +20,7 @@ package otelemetry
 
 import (
 	"context"
+	"errors"
 
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
@@ -89,12 +90,49 @@ func (h *RedisHook) DialHook(next redis.DialHook) redis.DialHook {
 	return next
 }
 
-// ProcessHook 实现 v9 版本要求的接口
+// ProcessHook 实现 v9 版本要求的接口，包装单条命令的执行
 func (h *RedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
-	return next
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		ctx, _ = h.BeforeProcess(ctx, cmd)
+		err := next(ctx, cmd)
+		spanErr := err
+		if spanErr == nil {
+			spanErr = cmd.Err()
+		}
+		endRedisSpan(ctx, spanErr)
+		return err
+	}
 }
 
-// ProcessPipelineHook 实现 v9 版本要求的接口
+// ProcessPipelineHook 实现 v9 版本要求的接口，包装管道命令的执行
 func (h *RedisHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return next
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		ctx, _ = h.BeforeProcessPipeline(ctx, cmds)
+		err := next(ctx, cmds)
+		spanErr := err
+		// next 返回 nil 或首个 redis.Nil 时，后续命令仍可能有真实错误
+		if spanErr == nil || errors.Is(spanErr, redis.Nil) {
+			for _, cmd := range cmds {
+				if cerr := cmd.Err(); cerr != nil && !errors.Is(cerr, redis.Nil) {
+					spanErr = cerr
+					break
+				}
+			}
+		}
+		endRedisSpan(ctx, spanErr)
+		return err
+	}
+}
+
+// endRedisSpan 结束 ctx 中的 span；redis.Nil 不视为服务错误
+func endRedisSpan(ctx context.Context, err error) {
+	span, ok := ctx.Value(redisSpanKey).(trace.Span)
+	if !ok {
+		return
+	}
+	defer span.End()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 }

@@ -66,16 +66,17 @@ func (h *GormTracingHook) Initialize(db *gorm.DB) error {
 // before 在数据库操作之前创建 span
 func (h *GormTracingHook) before(db *gorm.DB) {
 	spanName := "gorm"
+	attrs := []attribute.KeyValue{
+		attribute.String("db.system", "mysql"),
+		attribute.String("db.statement", db.Statement.SQL.String()),
+	}
+	// 原生 SQL（如 db.Exec）没有 Schema，此时不设置表名相关信息
 	if db.Statement.Schema != nil {
 		spanName = "gorm." + db.Statement.Schema.Table
+		attrs = append(attrs, attribute.String("db.operation", db.Statement.Schema.Table))
 	}
 
-	ctx, span := h.Tracer.Start(db.Statement.Context, spanName,
-		trace.WithAttributes(
-			attribute.String("db.system", "mysql"),
-			attribute.String("db.operation", db.Statement.Schema.Table),
-			attribute.String("db.statement", db.Statement.SQL.String()),
-		))
+	ctx, span := h.Tracer.Start(db.Statement.Context, spanName, trace.WithAttributes(attrs...))
 	db.Statement.Context = context.WithValue(ctx, dbSpanKey, span)
 }
 
